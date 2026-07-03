@@ -1,0 +1,511 @@
+<!doctype html>
+<!--
+  Throwaway map client for the vertical slice (project plan, next steps #7).
+  One file, no build step: served by the dev server so REST + WebSocket share
+  an origin. The real client will be React Native (see the project plan) —
+  nothing here is meant to survive.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Wasteland Scandinavia</title>
+<style>
+  :root {
+    --bg: #16130e;
+    --panel: #211c14;
+    --line: #3a3225;
+    --text: #d8cdb8;
+    --dim: #8d8268;
+    --accent: #e8a33d;
+    --danger: #cf5c4b;
+    --ok: #8fae56;
+    --water: #6fa3b7;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.45 ui-monospace, "Cascadia Mono", Menlo, Consolas, monospace;
+    display: flex; flex-direction: column; height: 100vh;
+  }
+  header {
+    padding: 8px 14px; border-bottom: 1px solid var(--line);
+    display: flex; align-items: baseline; gap: 14px;
+  }
+  header h1 { font-size: 15px; margin: 0; color: var(--accent); letter-spacing: 2px; text-transform: uppercase; }
+  header .sub { color: var(--dim); font-size: 12px; }
+  #conn { margin-left: auto; font-size: 12px; color: var(--dim); }
+  #conn.live { color: var(--ok); }
+  main { flex: 1; display: flex; min-height: 0; }
+  #map-pane { flex: 1; min-width: 0; position: relative; }
+  #map { width: 100%; height: 100%; display: block; cursor: crosshair; }
+  #sidebar {
+    width: 340px; border-left: 1px solid var(--line); overflow-y: auto;
+    padding: 12px; display: flex; flex-direction: column; gap: 12px;
+  }
+  section { background: var(--panel); border: 1px solid var(--line); padding: 10px; }
+  section h2 {
+    margin: 0 0 8px; font-size: 11px; letter-spacing: 2px; text-transform: uppercase;
+    color: var(--dim); border-bottom: 1px solid var(--line); padding-bottom: 5px;
+  }
+  .row { display: flex; justify-content: space-between; gap: 8px; }
+  .dim { color: var(--dim); }
+  .accent { color: var(--accent); }
+  .danger { color: var(--danger); }
+  .ok { color: var(--ok); }
+  button {
+    background: var(--accent); color: #1c1508; border: 0; padding: 6px 10px;
+    font: inherit; font-weight: bold; cursor: pointer; width: 100%;
+  }
+  button:disabled { background: var(--line); color: var(--dim); cursor: not-allowed; }
+  input {
+    width: 100%; background: var(--bg); border: 1px solid var(--line); color: var(--text);
+    padding: 5px 7px; font: inherit; margin: 3px 0 8px;
+  }
+  label { font-size: 12px; color: var(--dim); }
+  .crew {
+    border: 1px solid var(--line); padding: 6px 8px; margin-top: 6px; cursor: pointer;
+  }
+  .crew.selected { border-color: var(--accent); background: #2a2213; }
+  .crew.busy { opacity: .55; cursor: default; }
+  .bar { height: 5px; background: var(--bg); border: 1px solid var(--line); margin: 2px 0 6px; }
+  .bar i { display: block; height: 100%; }
+  .bar .scrap { background: var(--accent); }
+  .bar .fuel { background: var(--danger); }
+  .bar .water { background: var(--water); }
+  #log {
+    max-height: 170px; overflow-y: auto; font-size: 12px;
+  }
+  #log div { padding: 2px 0; border-bottom: 1px dotted var(--line); }
+  #toast {
+    position: absolute; left: 50%; bottom: 22px; transform: translateX(-50%);
+    background: var(--panel); border: 1px solid var(--danger); color: var(--text);
+    padding: 8px 14px; display: none; max-width: 70%;
+  }
+  /* map svg */
+  .route { stroke: var(--line); stroke-width: 2; }
+  .route-label { fill: var(--dim); font-size: 9px; text-anchor: middle; }
+  .loc circle { fill: #4a4131; stroke: var(--dim); stroke-width: 1.5; cursor: pointer; }
+  .loc.free:hover circle, .loc.selected circle { stroke: var(--accent); stroke-width: 2.5; }
+  .loc.mine circle { fill: #6e5218; stroke: var(--accent); }
+  .loc.theirs circle { fill: #57281f; stroke: var(--danger); }
+  .loc text { fill: var(--text); font-size: 11px; pointer-events: none; }
+  .loc .kind { fill: var(--dim); font-size: 9px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Wasteland Scandinavia</h1>
+  <span class="sub">the Region &mdash; vertical slice client</span>
+  <span id="conn">connecting&hellip;</span>
+</header>
+<main>
+  <div id="map-pane">
+    <svg id="map"></svg>
+    <div id="toast"></div>
+  </div>
+  <div id="sidebar">
+    <section id="location-card" hidden>
+      <h2>Location</h2>
+      <div id="location-body"></div>
+    </section>
+    <section id="found-card" hidden>
+      <h2>Found your Faction</h2>
+      <div id="found-hint" class="dim">Click a free Location on the map to choose your HQ.</div>
+      <form id="found-form" hidden>
+        <label>HQ Location</label>
+        <input id="f-hq" disabled>
+        <label>Your name</label>
+        <input id="f-name" required placeholder="Mad Mikkel">
+        <label>Email</label>
+        <input id="f-email" type="email" required placeholder="you@wasteland.dk">
+        <label>Faction name</label>
+        <input id="f-faction" required placeholder="Rust Barons">
+        <button type="submit">Found Faction</button>
+      </form>
+    </section>
+    <section id="faction-card" hidden>
+      <h2>Faction</h2>
+      <div id="faction-body"></div>
+    </section>
+    <section id="crews-card" hidden>
+      <h2>Crews</h2>
+      <div class="dim" style="font-size:12px">Select an idle Crew, then click a Location to dispatch a Scavenge Mission.</div>
+      <div id="crews-body"></div>
+    </section>
+    <section id="missions-card" hidden>
+      <h2>Missions underway</h2>
+      <div id="missions-body"></div>
+    </section>
+    <section>
+      <h2>Event log</h2>
+      <div id="log"></div>
+    </section>
+  </div>
+</main>
+<script>
+'use strict'
+
+const $ = (id) => document.getElementById(id)
+const state = {
+  map: null,               // { locations, routes }
+  locById: new Map(),
+  faction: null,           // GET /factions/:id snapshot
+  factionId: localStorage.getItem('wasteland.factionId'),
+  selectedCrewId: null,
+  selectedLocation: null,  // clicked location object
+  hqPick: null,            // location picked as HQ during founding
+}
+
+// ---------- helpers ----------
+
+function logLine(text, cls) {
+  const div = document.createElement('div')
+  if (cls) div.className = cls
+  div.textContent = `${new Date().toLocaleTimeString()}  ${text}`
+  const log = $('log')
+  log.prepend(div)
+  while (log.childElementCount > 60) log.lastChild.remove()
+}
+
+let toastTimer
+function toast(text) {
+  const el = $('toast')
+  el.textContent = text
+  el.style.display = 'block'
+  clearTimeout(toastTimer)
+  toastTimer = setTimeout(() => { el.style.display = 'none' }, 5000)
+}
+
+async function api(path, options) {
+  const res = await fetch(path, options)
+  const body = await res.json().catch(() => ({}))
+  if (!res.ok) throw new Error(body.message || body.error || `HTTP ${res.status}`)
+  return body
+}
+
+function fmtAmount(n) { return Math.floor(n).toLocaleString() }
+
+function fmtCountdown(dueAt) {
+  const ms = new Date(dueAt) - Date.now()
+  if (ms <= 0) return 'resolving…'
+  const totalMinutes = Math.floor(ms / 60000)
+  const h = Math.floor(totalMinutes / 60), m = totalMinutes % 60, s = Math.floor(ms / 1000) % 60
+  return h > 0 ? `${h}h ${m}m` : `${m}m ${String(s).padStart(2, '0')}s`
+}
+
+// ---------- map rendering ----------
+
+const SVG_NS = 'http://www.w3.org/2000/svg'
+
+function project(locations) {
+  const lats = locations.map(l => l.lat), lons = locations.map(l => l.lon)
+  const minLat = Math.min(...lats), maxLat = Math.max(...lats)
+  const minLon = Math.min(...lons), maxLon = Math.max(...lons)
+  const midLat = (minLat + maxLat) / 2
+  const kx = Math.cos(midLat * Math.PI / 180)
+  const height = 800, pad = 60
+  const scale = (height - 2 * pad) / (maxLat - minLat)
+  const width = (maxLon - minLon) * kx * scale + 2 * pad
+  const toXY = (l) => ({
+    x: pad + (l.lon - minLon) * kx * scale,
+    y: pad + (maxLat - l.lat) * scale,
+  })
+  return { width, height, toXY }
+}
+
+function renderMap() {
+  const svg = $('map')
+  svg.innerHTML = ''
+  const { locations, routes } = state.map
+  const { width, height, toXY } = project(locations)
+  svg.setAttribute('viewBox', `0 0 ${width} ${height}`)
+  svg.setAttribute('preserveAspectRatio', 'xMidYMid meet')
+
+  for (const route of routes) {
+    const a = toXY(state.locById.get(route.location_a_id))
+    const b = toXY(state.locById.get(route.location_b_id))
+    const line = document.createElementNS(SVG_NS, 'line')
+    line.setAttribute('class', 'route')
+    line.setAttribute('x1', a.x); line.setAttribute('y1', a.y)
+    line.setAttribute('x2', b.x); line.setAttribute('y2', b.y)
+    svg.appendChild(line)
+    const label = document.createElementNS(SVG_NS, 'text')
+    label.setAttribute('class', 'route-label')
+    label.setAttribute('x', (a.x + b.x) / 2)
+    label.setAttribute('y', (a.y + b.y) / 2 - 4)
+    label.textContent = `${route.distance_km} km`
+    svg.appendChild(label)
+  }
+
+  const positions = locations.map(l => ({ loc: l, ...toXY(l) }))
+  // Put a label on the left when a neighbour sits close on the right, so
+  // same-latitude Locations (Skagen/Gothenburg) don't overprint each other.
+  const labelLeft = (p) => positions.some(q =>
+    q !== p && q.x > p.x && q.x - p.x < 160 && Math.abs(q.y - p.y) < 20)
+
+  for (const p of positions) {
+    const { loc, x, y } = p
+    const g = document.createElementNS(SVG_NS, 'g')
+    let cls = 'loc free'
+    if (loc.controlling_faction_id) {
+      cls = loc.controlling_faction_id === state.factionId ? 'loc mine' : 'loc theirs'
+    }
+    if (state.selectedLocation && state.selectedLocation.id === loc.id) cls += ' selected'
+    g.setAttribute('class', cls)
+    const circle = document.createElementNS(SVG_NS, 'circle')
+    circle.setAttribute('cx', x); circle.setAttribute('cy', y); circle.setAttribute('r', 9)
+    g.appendChild(circle)
+    const left = labelLeft(p)
+    const labelX = left ? x - 13 : x + 13
+    const anchor = left ? 'end' : 'start'
+    const name = document.createElementNS(SVG_NS, 'text')
+    name.setAttribute('x', labelX); name.setAttribute('y', y + 4)
+    name.setAttribute('text-anchor', anchor)
+    name.textContent = loc.name
+    g.appendChild(name)
+    const kind = document.createElementNS(SVG_NS, 'text')
+    kind.setAttribute('class', 'kind')
+    kind.setAttribute('x', labelX); kind.setAttribute('y', y + 16)
+    kind.setAttribute('text-anchor', anchor)
+    kind.textContent = loc.kind.replace('_', ' ')
+    g.appendChild(kind)
+    g.addEventListener('click', () => onLocationClick(loc))
+    svg.appendChild(g)
+  }
+}
+
+// ---------- sidebar rendering ----------
+
+function renderLocationCard() {
+  const loc = state.selectedLocation
+  $('location-card').hidden = !loc
+  if (!loc) return
+  const body = $('location-body')
+  body.innerHTML = ''
+  const owner = loc.controlling_faction_id
+    ? (loc.controlling_faction_id === state.factionId ? 'yours' : 'rival Faction')
+    : 'unclaimed'
+  body.insertAdjacentHTML('beforeend', `
+    <div class="row"><b>${loc.name}</b><span class="dim">${loc.kind.replace('_', ' ')}</span></div>
+    <div class="row"><span class="dim">control</span><span>${owner}</span></div>
+    <div class="row"><span class="dim">Scrap yield</span><span>${loc.scrap_yield}/h</span></div>
+    <div class="row"><span class="dim">Fuel yield</span><span>${loc.fuel_yield}/h</span></div>
+    <div class="row"><span class="dim">Water yield</span><span>${loc.water_yield}/h</span></div>
+  `)
+  if (state.faction && state.selectedCrewId) {
+    const crew = state.faction.crews.find(c => c.id === state.selectedCrewId)
+    if (crew && crew.status === 'idle') {
+      const button = document.createElement('button')
+      button.style.marginTop = '8px'
+      button.textContent = `Dispatch ${crew.name}: Scavenge`
+      button.addEventListener('click', () => dispatchScavenge(loc))
+      body.appendChild(button)
+    }
+  } else if (state.faction) {
+    body.insertAdjacentHTML('beforeend', '<div class="dim" style="margin-top:6px">Select an idle Crew to dispatch here.</div>')
+  }
+}
+
+function renderFaction() {
+  const hasFaction = !!state.faction
+  $('found-card').hidden = hasFaction
+  $('faction-card').hidden = !hasFaction
+  $('crews-card').hidden = !hasFaction
+  $('missions-card').hidden = !hasFaction
+  if (!hasFaction) return
+
+  const f = state.faction
+  const factionBody = $('faction-body')
+  factionBody.innerHTML = `<div class="row"><b class="accent">${f.faction.name}</b></div>`
+  for (const outpost of f.outposts) {
+    const dormant = outpost.dormantAt
+      ? `<span class="danger">Dormant ${new Date(outpost.dormantAt) <= new Date() ? 'now' : 'at ' + new Date(outpost.dormantAt).toLocaleString()}</span>`
+      : '<span class="ok">supplied</span>'
+    const bars = ['scrap', 'fuel', 'water'].map(res => {
+      const amount = outpost.stores[res] ?? 0
+      return `<div class="row"><span class="dim">${res}</span><span>${fmtAmount(amount)}</span></div>
+              <div class="bar"><i class="${res}" style="width:${Math.min(100, amount / storeCapacityGuess(res) * 100)}%"></i></div>`
+    }).join('')
+    factionBody.insertAdjacentHTML('beforeend', `
+      <div style="margin-top:8px;border-top:1px solid var(--line);padding-top:6px">
+        <div class="row"><b>${locNameBySlug(outpost.locationSlug)}</b>${outpost.isHq ? '<span class="accent">HQ</span>' : ''}</div>
+        <div class="row"><span class="dim">Survivors</span><span>${outpost.survivors}</span></div>
+        <div class="row"><span class="dim">Water status</span>${dormant}</div>
+        ${bars}
+      </div>`)
+  }
+
+  const crewsBody = $('crews-body')
+  crewsBody.innerHTML = ''
+  for (const crew of f.crews) {
+    const div = document.createElement('div')
+    const idle = crew.status === 'idle'
+    div.className = 'crew' + (idle ? '' : ' busy') + (crew.id === state.selectedCrewId ? ' selected' : '')
+    div.innerHTML = `<div class="row"><b>${crew.name}</b><span class="${idle ? 'ok' : 'dim'}">${crew.status.replace('_', ' ')}</span></div>
+                     <div class="row"><span class="dim">size ${crew.size}</span><span class="dim">${locNameById(crew.location_id)}</span></div>`
+    if (idle) div.addEventListener('click', () => {
+      state.selectedCrewId = state.selectedCrewId === crew.id ? null : crew.id
+      renderFaction(); renderLocationCard()
+    })
+    crewsBody.appendChild(div)
+  }
+
+  const missionsBody = $('missions-body')
+  missionsBody.innerHTML = f.missions.length ? '' : '<div class="dim">none</div>'
+  for (const mission of f.missions) {
+    missionsBody.insertAdjacentHTML('beforeend', `
+      <div class="row" style="margin-top:4px">
+        <span>${mission.kind} &rarr; ${locNameById(mission.target_location_id)}</span>
+        <span class="accent" data-due="${mission.due_at}">${fmtCountdown(mission.due_at)}</span>
+      </div>`)
+  }
+}
+
+// Capacities aren't exposed by the API yet; use founding defaults for the bars.
+function storeCapacityGuess(resource) {
+  return { scrap: 500, fuel: 200, water: 300 }[resource] ?? 500
+}
+
+function locNameBySlug(slug) {
+  const loc = state.map.locations.find(l => l.slug === slug)
+  return loc ? loc.name : slug
+}
+function locNameById(id) {
+  const loc = state.locById.get(id)
+  return loc ? loc.name : '?'
+}
+
+// ---------- actions ----------
+
+function onLocationClick(loc) {
+  state.selectedLocation = loc
+  if (!state.faction && !loc.controlling_faction_id) {
+    state.hqPick = loc
+    $('found-hint').hidden = true
+    $('found-form').hidden = false
+    $('f-hq').value = loc.name
+  }
+  renderMap()
+  renderLocationCard()
+}
+
+$('found-form').addEventListener('submit', async (event) => {
+  event.preventDefault()
+  if (!state.hqPick) return toast('Pick an HQ Location on the map first.')
+  try {
+    const result = await api('/factions', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        email: $('f-email').value,
+        displayName: $('f-name').value,
+        factionName: $('f-faction').value,
+        hqLocationSlug: state.hqPick.slug,
+      }),
+    })
+    state.factionId = result.factionId
+    localStorage.setItem('wasteland.factionId', result.factionId)
+    logLine(`Faction founded at ${state.hqPick.name}`, 'ok')
+    await refreshAll()
+  } catch (err) { toast(err.message) }
+})
+
+async function dispatchScavenge(target) {
+  try {
+    const result = await api('/missions', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        factionId: state.factionId,
+        crewId: state.selectedCrewId,
+        targetLocationSlug: target.slug,
+      }),
+    })
+    logLine(`Scavenge dispatched to ${target.name}, back ${fmtCountdown(result.dueAt)} from now (${result.fuelSpent} Fuel)`, 'accent')
+    state.selectedCrewId = null
+    await refreshFaction()
+    renderLocationCard()
+  } catch (err) { toast(err.message) }
+}
+
+// ---------- data flow ----------
+
+async function refreshMap() {
+  state.map = await api('/map')
+  state.locById = new Map(state.map.locations.map(l => [l.id, l]))
+  // keep the selected location object fresh
+  if (state.selectedLocation) {
+    state.selectedLocation = state.locById.get(state.selectedLocation.id) ?? null
+  }
+  renderMap()
+}
+
+async function refreshFaction() {
+  if (!state.factionId) { state.faction = null; renderFaction(); return }
+  try {
+    state.faction = await api(`/factions/${state.factionId}`)
+  } catch (err) {
+    // stale localStorage (e.g. dev DB wiped) — start over
+    logLine(`Faction not found (${err.message}); clearing saved id`, 'danger')
+    localStorage.removeItem('wasteland.factionId')
+    state.factionId = null
+    state.faction = null
+  }
+  renderFaction()
+}
+
+async function refreshAll() {
+  await refreshMap()
+  await refreshFaction()
+  renderLocationCard()
+}
+
+function connectWs() {
+  const ws = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`)
+  ws.onopen = () => { $('conn').textContent = 'live'; $('conn').className = 'live' }
+  ws.onclose = () => {
+    $('conn').textContent = 'reconnecting…'; $('conn').className = ''
+    setTimeout(connectWs, 2000)
+  }
+  ws.onmessage = (event) => {
+    let msg
+    try { msg = JSON.parse(event.data) } catch { return }
+    if (msg.type === 'faction_founded') {
+      if (msg.factionId !== state.factionId) {
+        logLine(`A Faction was founded at ${locNameBySlug(msg.hqLocationSlug)}`)
+      }
+      refreshMap()
+    } else if (msg.type === 'mission_dispatched') {
+      if (msg.factionId === state.factionId) refreshFaction()
+      else logLine(`A rival Crew rolled out toward ${locNameBySlug(msg.targetLocationSlug)}`)
+    } else if (msg.type === 'mission_resolved') {
+      if (msg.factionId === state.factionId) {
+        const haul = Object.entries(msg.haul)
+          .filter(([, n]) => n > 0)
+          .map(([res, n]) => `${n} ${res}`).join(', ') || 'nothing'
+        logLine(`Crew returned — hauled ${haul}`, 'ok')
+        refreshFaction()
+      } else {
+        logLine('A rival Mission resolved')
+      }
+    }
+  }
+}
+
+// countdowns tick locally; stores re-settle on the 10s poll
+setInterval(() => {
+  document.querySelectorAll('[data-due]').forEach(el => {
+    el.textContent = fmtCountdown(el.dataset.due)
+  })
+}, 1000)
+setInterval(refreshFaction, 10_000)
+
+refreshAll().then(() => {
+  $('found-card').hidden = !!state.factionId
+  connectWs()
+  logLine('Map loaded. ' + (state.factionId ? 'Welcome back.' : 'Click a free Location to found your Faction.'))
+}).catch(err => toast(err.message))
+</script>
+</body>
+</html>
