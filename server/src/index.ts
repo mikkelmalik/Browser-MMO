@@ -1,4 +1,5 @@
 import { fileURLToPath } from 'node:url'
+import fastifyStatic from '@fastify/static'
 import { createDb } from './db/db.js'
 import { buildApp } from './api/app.js'
 import { seedWorldIfEmpty } from './world.js'
@@ -8,6 +9,11 @@ const db = await createDb(dataDir)
 const seeded = await seedWorldIfEmpty(db)
 
 const app = await buildApp({ db, clock: () => new Date() })
+
+// Throwaway map client (dev only — the API itself stays client-free).
+await app.fastify.register(fastifyStatic, {
+  root: fileURLToPath(new URL('../public', import.meta.url)),
+})
 
 const TICK_INTERVAL_MS = 1000
 setInterval(() => {

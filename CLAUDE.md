@@ -45,7 +45,7 @@ Still open (do not assume): world permanence (seasons vs. eternal — explicitly
 - `docs/game-project-plan.md` — the project plan and decision log; keep it updated as decisions are made.
 - `CONTEXT.md` — the domain glossary (ubiquitous language); `docs/adr/` — architecture decision records.
 - `docs/db-schema.md` — full schema draft; `server/src/db/schema.sql` — the vertical-slice subset actually applied.
-- `server/` — the game server (TypeScript, Fastify, PGlite): `src/domain/` pure game rules and transactional operations, `src/api/` HTTP + WebSocket layer, `src/world.ts` seed data, `test/` Vitest suites.
+- `server/` — the game server (TypeScript, Fastify, PGlite): `src/domain/` pure game rules and transactional operations, `src/api/` HTTP + WebSocket layer, `src/world.ts` seed data, `test/` Vitest suites, `public/` a throwaway single-file map client served by the dev server (disposable; the real client will be React Native).
 - `.claude/skills/` and `.agents/skills/` — installed agent skills (mirrored copies, mostly from `mattpocock/skills`), pinned by `skills-lock.json` at the repo root. Don't hand-edit these; they are managed by the skills installer.
 
 ## Agent skills
