@@ -102,3 +102,40 @@ create table if not exists due_events (
 );
 
 create index if not exists due_events_pending on due_events (due_at) where processed_at is null;
+
+-- A Claim plants a flag on a Location and must survive its contest window.
+create table if not exists claims (
+  id                    uuid primary key default gen_random_uuid(),
+  location_id           uuid not null references locations(id),
+  claimant_faction_id   uuid not null references factions(id),
+  mission_id            uuid not null references missions(id),
+  opened_at             timestamptz not null default now(),
+  closes_at             timestamptz not null,        -- window length: tuning knob
+  status                text not null default 'open' check (status in
+                          ('open', 'won', 'lost', 'withdrawn'))
+);
+
+create unique index if not exists one_open_claim_per_location on claims (location_id) where status = 'open';
+
+create table if not exists claim_contests (
+  claim_id    uuid not null references claims(id),
+  faction_id  uuid not null references factions(id),
+  mission_id  uuid not null references missions(id),
+  primary key (claim_id, faction_id)
+);
+
+-- Reports: the generated after-action account of every resolved fight.
+create table if not exists reports (
+  id           uuid primary key default gen_random_uuid(),
+  kind         text not null check (kind in ('contest', 'siege', 'raid')),
+  location_id  uuid not null references locations(id),
+  body         jsonb not null,
+  created_at   timestamptz not null default now()
+);
+
+create table if not exists report_factions (
+  report_id   uuid not null references reports(id),
+  faction_id  uuid not null references factions(id),
+  read_at     timestamptz,
+  primary key (report_id, faction_id)
+);

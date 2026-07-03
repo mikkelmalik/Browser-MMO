@@ -234,7 +234,7 @@ Siege protections that are rules, not constraints: an Outpost with `is_hq` can n
 
 ## Vertical slice subset
 
-The Scavenge Mission slice needs only: `users`, `factions`, `locations`, `routes`, `outposts`, `outpost_stores`, `crews`, `missions`, `due_events`. Everything under "Conflict" ships later; nothing in the slice tables needs rework to add it.
+The Scavenge Mission slice needs only: `users`, `factions`, `locations`, `routes`, `outposts`, `outpost_stores`, `crews`, `missions`, `due_events`. The Claim + contest window feature added `claims`, `claim_contests`, `reports`, and `report_factions` (2026-07-03). `sieges`/`siege_forces` ship later; nothing in the applied tables needs rework to add them.
 
 ## Deliberately not modeled (yet)
 

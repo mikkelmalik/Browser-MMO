@@ -71,6 +71,57 @@ export async function seedFixture(db: Db, now: Date, opts: FixtureOpts = {}): Pr
   }
 }
 
+export interface RivalFixture {
+  factionId: string
+  crewId: string
+  outpostId: string
+  campLocationId: string
+}
+
+/**
+ * A rival Faction one Route from the fixture's rich-ruins target (20 min
+ * travel, 5 Fuel per traversal), with an Outpost and an idle Crew of 4.
+ */
+export async function seedRival(db: Db, now: Date): Promise<RivalFixture> {
+  const user = await one<{ id: string }>(db,
+    `insert into users (email, display_name) values ('rival@test.se', 'Rival') returning id`)
+  const faction = await one<{ id: string }>(db,
+    `insert into factions (name, owner_user_id) values ('Oslo Wreckers', $1) returning id`,
+    [user.id])
+
+  const camp = await one<{ id: string }>(db,
+    `insert into locations (slug, name, kind, lat, lon, scrap_yield, fuel_yield, water_yield)
+     values ('rival-camp', 'Rival Camp', 'town', 55.8, 12.7, 1, 1, 3) returning id`)
+  const ruins = await one<{ id: string }>(db, `select id from locations where slug = 'rich-ruins'`)
+  await db.query(
+    `insert into routes (location_a_id, location_b_id, distance_km, fuel_cost, travel_minutes)
+     values (least($1::uuid, $2::uuid), greatest($1::uuid, $2::uuid), 40, 5, 20)`,
+    [camp.id, ruins.id])
+
+  const outpost = await one<{ id: string }>(db,
+    `insert into outposts (faction_id, location_id, is_hq, survivors)
+     values ($1, $2, true, 8) returning id`,
+    [faction.id, camp.id])
+  await db.query(`update locations set controlling_faction_id = $1 where id = $2`,
+    [faction.id, camp.id])
+
+  for (const [resource, amount, rate, capacity] of [
+    ['scrap', 50, 1, 500], ['fuel', 100, 1, 200], ['water', 200, 0, 300],
+  ] as Array<[string, number, number, number]>) {
+    await db.query(
+      `insert into outpost_stores (outpost_id, resource, amount, rate_per_hour, capacity, settled_at)
+       values ($1, $2, $3, $4, $5, $6)`,
+      [outpost.id, resource, amount, rate, capacity, now])
+  }
+
+  const crew = await one<{ id: string }>(db,
+    `insert into crews (faction_id, name, size, location_id)
+     values ($1, 'Wreck Runners', 4, $2) returning id`,
+    [faction.id, camp.id])
+
+  return { factionId: faction.id, crewId: crew.id, outpostId: outpost.id, campLocationId: camp.id }
+}
+
 export async function getStoreAmount(db: Db, outpostId: string, resource: string): Promise<number> {
   const row = await one<{ amount: number }>(db,
     `select amount::float8 as amount from outpost_stores where outpost_id = $1 and resource = $2`,

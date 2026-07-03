@@ -2,13 +2,18 @@ import Fastify, { type FastifyInstance } from 'fastify'
 import websocket from '@fastify/websocket'
 import { z, ZodError } from 'zod'
 import type { Db } from '../db/db.js'
-import { DomainError, dispatchScavenge, processDueEvents } from '../domain/scavenge.js'
+import { DomainError } from '../domain/errors.js'
+import { dispatchScavenge } from '../domain/scavenge.js'
+import { dispatchClaim, dispatchContest, type Rng } from '../domain/claims.js'
+import { processDueEvents } from '../domain/events.js'
 import { foundFaction } from '../domain/founding.js'
 import { settleStore } from '../domain/settlement.js'
 
 export interface AppDeps {
   db: Db
   clock: () => Date
+  /** Combat luck source; injectable for tests. */
+  rng?: Rng
 }
 
 export interface App {
@@ -28,9 +33,10 @@ const MissionBody = z.object({
   factionId: z.string().min(1),
   crewId: z.string().min(1),
   targetLocationSlug: z.string().min(1),
+  kind: z.enum(['scavenge', 'claim', 'contest']).default('scavenge'),
 })
 
-export async function buildApp({ db, clock }: AppDeps): Promise<App> {
+export async function buildApp({ db, clock, rng = Math.random }: AppDeps): Promise<App> {
   const fastify = Fastify()
   await fastify.register(websocket)
 
@@ -72,25 +78,42 @@ export async function buildApp({ db, clock }: AppDeps): Promise<App> {
       `select id from locations where slug = $1`, [body.targetLocationSlug])).rows[0]
     if (!target) throw new DomainError('location_not_found', `no location '${body.targetLocationSlug}'`)
 
-    const result = await dispatchScavenge(db, {
-      factionId: body.factionId,
-      crewId: body.crewId,
-      targetLocationId: target.id,
-    }, clock())
+    const args = { factionId: body.factionId, crewId: body.crewId, targetLocationId: target.id }
+    const now = clock()
+    const result = body.kind === 'claim' ? await dispatchClaim(db, args, now)
+      : body.kind === 'contest' ? await dispatchContest(db, args, now)
+      : await dispatchScavenge(db, args, now)
+    const dueAt = 'dueAt' in result ? result.dueAt : result.arrivesAt
 
     broadcast({
       type: 'mission_dispatched',
+      kind: body.kind,
       missionId: result.missionId,
       factionId: body.factionId,
       crewId: body.crewId,
       targetLocationSlug: body.targetLocationSlug,
-      dueAt: result.dueAt.toISOString(),
+      dueAt: dueAt.toISOString(),
     })
     return reply.status(201).send({
       missionId: result.missionId,
-      dueAt: result.dueAt.toISOString(),
+      dueAt: dueAt.toISOString(),
       fuelSpent: result.fuelSpent,
     })
+  })
+
+  fastify.get('/claims', async () => {
+    const claims = (await db.query(
+      `select cl.id, l.slug as location_slug, cl.claimant_faction_id, f.name as claimant_name,
+              cl.opened_at, cl.closes_at,
+              coalesce(json_agg(cc.faction_id) filter (where cc.faction_id is not null), '[]') as contesting_faction_ids
+       from claims cl
+       join locations l on l.id = cl.location_id
+       join factions f on f.id = cl.claimant_faction_id
+       left join claim_contests cc on cc.claim_id = cl.id
+       where cl.status = 'open'
+       group by cl.id, l.slug, cl.claimant_faction_id, f.name, cl.opened_at, cl.closes_at
+       order by cl.closes_at`)).rows
+    return { claims }
   })
 
   fastify.get('/map', async () => {
@@ -168,12 +191,18 @@ export async function buildApp({ db, clock }: AppDeps): Promise<App> {
       `select id, crew_id, kind, status, target_location_id, departed_at, due_at
        from missions where faction_id = $1 and status = 'underway'`, [id])).rows
 
-    return reply.send({ faction, outposts, crews, missions })
+    const reports = (await db.query(
+      `select r.id, r.kind, r.body, r.created_at, rf.read_at
+       from report_factions rf join reports r on r.id = rf.report_id
+       where rf.faction_id = $1
+       order by r.created_at desc limit 20`, [id])).rows
+
+    return reply.send({ faction, outposts, crews, missions, reports })
   })
 
   const tickDue = async () => {
-    const resolutions = await processDueEvents(db, clock())
-    for (const resolution of resolutions) broadcast({ ...resolution })
+    const events = await processDueEvents(db, clock(), rng)
+    for (const event of events) broadcast({ ...event })
   }
 
   return { fastify, tickDue }

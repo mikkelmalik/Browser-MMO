@@ -91,6 +91,8 @@
   .loc.theirs circle { fill: #57281f; stroke: var(--danger); }
   .loc text { fill: var(--text); font-size: 11px; pointer-events: none; }
   .loc .kind { fill: var(--dim); font-size: 9px; }
+  .claim-ring { fill: none; stroke: var(--accent); stroke-width: 1.5; stroke-dasharray: 4 3; pointer-events: none; }
+  .btn-row { display: flex; gap: 6px; margin-top: 8px; }
 </style>
 </head>
 <body>
@@ -137,6 +139,14 @@
       <h2>Missions underway</h2>
       <div id="missions-body"></div>
     </section>
+    <section id="claims-card" hidden>
+      <h2>Open Claims</h2>
+      <div id="claims-body"></div>
+    </section>
+    <section id="reports-card" hidden>
+      <h2>Reports</h2>
+      <div id="reports-body"></div>
+    </section>
     <section>
       <h2>Event log</h2>
       <div id="log"></div>
@@ -150,12 +160,15 @@ const $ = (id) => document.getElementById(id)
 const state = {
   map: null,               // { locations, routes }
   locById: new Map(),
+  claims: [],              // GET /claims (open claims, world-wide)
   faction: null,           // GET /factions/:id snapshot
   factionId: localStorage.getItem('wasteland.factionId'),
   selectedCrewId: null,
   selectedLocation: null,  // clicked location object
   hqPick: null,            // location picked as HQ during founding
 }
+
+const openClaimAt = (slug) => state.claims.find(c => c.location_slug === slug)
 
 // ---------- helpers ----------
 
@@ -256,6 +269,12 @@ function renderMap() {
     const circle = document.createElementNS(SVG_NS, 'circle')
     circle.setAttribute('cx', x); circle.setAttribute('cy', y); circle.setAttribute('r', 9)
     g.appendChild(circle)
+    if (openClaimAt(loc.slug)) {
+      const ring = document.createElementNS(SVG_NS, 'circle')
+      ring.setAttribute('class', 'claim-ring')
+      ring.setAttribute('cx', x); ring.setAttribute('cy', y); ring.setAttribute('r', 14)
+      g.appendChild(ring)
+    }
     const left = labelLeft(p)
     const labelX = left ? x - 13 : x + 13
     const anchor = left ? 'end' : 'start'
@@ -286,24 +305,74 @@ function renderLocationCard() {
   const owner = loc.controlling_faction_id
     ? (loc.controlling_faction_id === state.factionId ? 'yours' : 'rival Faction')
     : 'unclaimed'
+  const claim = openClaimAt(loc.slug)
   body.insertAdjacentHTML('beforeend', `
     <div class="row"><b>${loc.name}</b><span class="dim">${loc.kind.replace('_', ' ')}</span></div>
     <div class="row"><span class="dim">control</span><span>${owner}</span></div>
     <div class="row"><span class="dim">Scrap yield</span><span>${loc.scrap_yield}/h</span></div>
     <div class="row"><span class="dim">Fuel yield</span><span>${loc.fuel_yield}/h</span></div>
     <div class="row"><span class="dim">Water yield</span><span>${loc.water_yield}/h</span></div>
+    ${claim ? `<div class="row"><span class="dim">open Claim</span><span class="accent">${
+      claim.claimant_faction_id === state.factionId ? 'yours' : claim.claimant_name
+    } &middot; closes <span data-due="${claim.closes_at}">${fmtCountdown(claim.closes_at)}</span></span></div>` : ''}
   `)
   if (state.faction && state.selectedCrewId) {
     const crew = state.faction.crews.find(c => c.id === state.selectedCrewId)
     if (crew && crew.status === 'idle') {
-      const button = document.createElement('button')
-      button.style.marginTop = '8px'
-      button.textContent = `Dispatch ${crew.name}: Scavenge`
-      button.addEventListener('click', () => dispatchScavenge(loc))
-      body.appendChild(button)
+      const row = document.createElement('div')
+      row.className = 'btn-row'
+      const addAction = (label, kind) => {
+        const button = document.createElement('button')
+        button.textContent = label
+        button.addEventListener('click', () => dispatchMission(kind, loc))
+        row.appendChild(button)
+      }
+      addAction('Scavenge', 'scavenge')
+      if (!loc.controlling_faction_id && !claim) addAction('Claim', 'claim')
+      if (claim && claim.claimant_faction_id !== state.factionId) addAction('Contest', 'contest')
+      body.appendChild(row)
     }
   } else if (state.faction) {
     body.insertAdjacentHTML('beforeend', '<div class="dim" style="margin-top:6px">Select an idle Crew to dispatch here.</div>')
+  }
+}
+
+function renderClaims() {
+  if (!state.map) return // claims render against location names; map loads first
+  $('claims-card').hidden = !state.faction
+  const body = $('claims-body')
+  body.innerHTML = state.claims.length ? '' : '<div class="dim">none</div>'
+  for (const claim of state.claims) {
+    const who = claim.claimant_faction_id === state.factionId
+      ? '<span class="accent">your flag</span>' : claim.claimant_name
+    const contests = claim.contesting_faction_ids.length
+    body.insertAdjacentHTML('beforeend', `
+      <div style="margin-top:4px">
+        <div class="row"><b>${locNameBySlug(claim.location_slug)}</b>
+          <span class="accent" data-due="${claim.closes_at}">${fmtCountdown(claim.closes_at)}</span></div>
+        <div class="row"><span class="dim">${who}</span>
+          <span class="${contests ? 'danger' : 'dim'}">${contests ? `contested ×${contests}` : 'uncontested'}</span></div>
+      </div>`)
+  }
+}
+
+function renderReports() {
+  const reports = state.faction?.reports ?? []
+  $('reports-card').hidden = !state.faction || reports.length === 0
+  const body = $('reports-body')
+  body.innerHTML = ''
+  for (const report of reports.slice(0, 5)) {
+    const b = report.body
+    const lines = (b.sides ?? []).map(s =>
+      `<div class="row"><span class="dim">${s.factionId === state.factionId ? 'you' : 'rival'} (${s.role}, crew ${s.crewSize})</span>` +
+      `<span>power ${s.power.toFixed(1)}</span></div>`).join('')
+    const won = b.winnerFactionId === state.factionId
+    body.insertAdjacentHTML('beforeend', `
+      <div style="margin-top:6px;border-top:1px solid var(--line);padding-top:4px">
+        <div class="row"><b>Showdown at ${locNameBySlug(b.locationSlug)}</b>
+          <span class="${won ? 'ok' : 'danger'}">${won ? 'won' : 'lost'}</span></div>
+        ${lines}
+      </div>`)
   }
 }
 
@@ -360,6 +429,9 @@ function renderFaction() {
         <span class="accent" data-due="${mission.due_at}">${fmtCountdown(mission.due_at)}</span>
       </div>`)
   }
+
+  renderClaims()
+  renderReports()
 }
 
 // Capacities aren't exposed by the API yet; use founding defaults for the bars.
@@ -411,7 +483,7 @@ $('found-form').addEventListener('submit', async (event) => {
   } catch (err) { toast(err.message) }
 })
 
-async function dispatchScavenge(target) {
+async function dispatchMission(kind, target) {
   try {
     const result = await api('/missions', {
       method: 'POST',
@@ -420,9 +492,11 @@ async function dispatchScavenge(target) {
         factionId: state.factionId,
         crewId: state.selectedCrewId,
         targetLocationSlug: target.slug,
+        kind,
       }),
     })
-    logLine(`Scavenge dispatched to ${target.name}, back ${fmtCountdown(result.dueAt)} from now (${result.fuelSpent} Fuel)`, 'accent')
+    const verb = { scavenge: 'Scavenge dispatched to', claim: 'Claim crew rolling to', contest: 'Contest crew rolling to' }[kind]
+    logLine(`${verb} ${target.name}, due ${fmtCountdown(result.dueAt)} from now (${result.fuelSpent} Fuel)`, 'accent')
     state.selectedCrewId = null
     await refreshFaction()
     renderLocationCard()
@@ -455,8 +529,15 @@ async function refreshFaction() {
   renderFaction()
 }
 
+async function refreshClaims() {
+  state.claims = (await api('/claims')).claims
+  renderClaims()
+  if (state.map) renderMap() // claim rings live on the map
+}
+
 async function refreshAll() {
   await refreshMap()
+  await refreshClaims()
   await refreshFaction()
   renderLocationCard()
 }
@@ -489,6 +570,31 @@ function connectWs() {
       } else {
         logLine('A rival Mission resolved')
       }
+    } else if (msg.type === 'claim_opened') {
+      const who = msg.claimantFactionId === state.factionId ? 'Your flag is planted' : 'A rival flag was planted'
+      logLine(`${who} at ${locNameBySlug(msg.locationSlug)} — window closes ${fmtCountdown(msg.closesAt)} from now`, 'accent')
+      refreshClaims().then(refreshMap)
+      if (msg.claimantFactionId === state.factionId) refreshFaction()
+    } else if (msg.type === 'claim_failed' || msg.type === 'contest_failed') {
+      if (msg.factionId === state.factionId) {
+        logLine(`Your crew turned back at ${locNameBySlug(msg.locationSlug)} (${msg.reason.replaceAll('_', ' ')})`, 'danger')
+        refreshFaction()
+      }
+    } else if (msg.type === 'claim_contested') {
+      const who = msg.contestantFactionId === state.factionId ? 'Your crew reached' : 'A rival crew is contesting'
+      logLine(`${who} the claim at ${locNameBySlug(msg.locationSlug)}`, 'danger')
+      refreshClaims()
+      if (msg.contestantFactionId === state.factionId) refreshFaction()
+    } else if (msg.type === 'claim_resolved') {
+      const mine = msg.claimantFactionId === state.factionId
+      const involved = mine || msg.winnerFactionId === state.factionId
+      if (msg.won) {
+        logLine(`${mine ? 'Your' : 'A'} claim at ${locNameBySlug(msg.locationSlug)} held — ${mine ? 'the Location is yours' : 'control transferred'}`, mine ? 'ok' : undefined)
+      } else {
+        logLine(`The claim at ${locNameBySlug(msg.locationSlug)} was broken${msg.contested ? ' in a showdown' : ''}`, mine ? 'danger' : undefined)
+      }
+      refreshClaims().then(refreshMap)
+      if (involved) refreshFaction()
     }
   }
 }

@@ -1,10 +1,7 @@
 import { beforeEach, describe, expect, test } from 'vitest'
 import { createDb, type Db } from '../src/db/db.js'
-import {
-  DomainError,
-  dispatchScavenge,
-  processDueEvents,
-} from '../src/domain/scavenge.js'
+import { dispatchScavenge } from '../src/domain/scavenge.js'
+import { processDueEvents } from '../src/domain/events.js'
 import { getStoreAmount, seedFixture, type Fixture } from './fixtures.js'
 
 const NOW = new Date('2026-07-03T12:00:00Z')

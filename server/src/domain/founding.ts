@@ -1,6 +1,6 @@
 import type { Db } from '../db/db.js'
 import { computeDormantAt } from './settlement.js'
-import { DomainError } from './scavenge.js'
+import { DomainError } from './errors.js'
 
 // Tuning knobs (plan open question #3)
 export const STARTING = {
@@ -49,6 +49,11 @@ export async function foundFaction(db: Db, args: FoundArgs, now: Date): Promise<
     if (!location) throw new DomainError('location_not_found', `no location '${args.hqLocationSlug}'`)
     if (location.controlling_faction_id) {
       throw new DomainError('location_taken', 'that location is already controlled')
+    }
+    const openClaim = (await tx.query(
+      `select 1 from claims where location_id = $1 and status = 'open'`, [location.id])).rows[0]
+    if (openClaim) {
+      throw new DomainError('claim_already_open', 'a claim is already open on that location')
     }
 
     const user = (await tx.query<{ id: string }>(
