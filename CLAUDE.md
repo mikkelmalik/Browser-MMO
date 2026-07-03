@@ -47,3 +47,17 @@ Still open (do not assume): world permanence (seasons vs. eternal — explicitly
 - `docs/db-schema.md` — full schema draft; `server/src/db/schema.sql` — the vertical-slice subset actually applied.
 - `server/` — the game server (TypeScript, Fastify, PGlite): `src/domain/` pure game rules and transactional operations, `src/api/` HTTP + WebSocket layer, `src/world.ts` seed data, `test/` Vitest suites.
 - `.claude/skills/` and `.agents/skills/` — installed agent skills (mirrored copies, mostly from `mattpocock/skills`), pinned by `skills-lock.json` at the repo root. Don't hand-edit these; they are managed by the skills installer.
+
+## Agent skills
+
+### Issue tracker
+
+Issues are tracked in GitHub Issues on `mikkelmalik/Browser-MMO`; external PRs are not a triage surface. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+The five canonical triage roles use their default label names (`needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`). See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context: one `CONTEXT.md` and `docs/adr/` at the repo root. See `docs/agents/domain.md`.
