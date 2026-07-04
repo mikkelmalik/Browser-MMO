@@ -34,7 +34,7 @@
   }
   header h1 { font-size: 15px; margin: 0; color: var(--accent); letter-spacing: 2px; text-transform: uppercase; }
   header .sub { color: var(--dim); font-size: 12px; }
-  #conn { margin-left: auto; font-size: 12px; color: var(--dim); }
+  #conn { font-size: 12px; color: var(--dim); }
   #conn.live { color: var(--ok); }
   main { flex: 1; display: flex; min-height: 0; }
   #map-pane { flex: 1; min-width: 0; position: relative; }
@@ -93,12 +93,14 @@
   .loc .kind { fill: var(--dim); font-size: 9px; }
   .claim-ring { fill: none; stroke: var(--accent); stroke-width: 1.5; stroke-dasharray: 4 3; pointer-events: none; }
   .btn-row { display: flex; gap: 6px; margin-top: 8px; }
+  a { color: var(--accent); }
 </style>
 </head>
 <body>
 <header>
   <h1>Wasteland Scandinavia</h1>
   <span class="sub">the Region &mdash; vertical slice client</span>
+  <span id="whoami" class="sub" style="margin-left:auto"></span>
   <span id="conn">connecting&hellip;</span>
 </header>
 <main>
@@ -111,16 +113,28 @@
       <h2>Location</h2>
       <div id="location-body"></div>
     </section>
+    <section id="login-card" hidden>
+      <h2>Sign in</h2>
+      <div class="dim" style="font-size:12px">Enter your email and we'll send a magic link.</div>
+      <form id="login-form">
+        <label>Email</label>
+        <input id="l-email" type="email" required placeholder="you@wasteland.dk">
+        <label>Name <span class="dim">(first time only)</span></label>
+        <input id="l-name" placeholder="Mad Mikkel">
+        <button type="submit">Email me a magic link</button>
+      </form>
+      <div id="login-sent" hidden style="margin-top:8px">
+        <div class="ok">Magic link sent to <b id="login-sent-email"></b>.</div>
+        <div class="dim" style="font-size:12px">Open the link in your email to sign in.</div>
+        <div class="btn-row"><button id="dev-open" hidden>Dev: open the link</button></div>
+      </div>
+    </section>
     <section id="found-card" hidden>
       <h2>Found your Faction</h2>
       <div id="found-hint" class="dim">Click a free Location on the map to choose your HQ.</div>
       <form id="found-form" hidden>
         <label>HQ Location</label>
         <input id="f-hq" disabled>
-        <label>Your name</label>
-        <input id="f-name" required placeholder="Mad Mikkel">
-        <label>Email</label>
-        <input id="f-email" type="email" required placeholder="you@wasteland.dk">
         <label>Faction name</label>
         <input id="f-faction" required placeholder="Rust Barons">
         <button type="submit">Found Faction</button>
@@ -161,8 +175,10 @@ const state = {
   map: null,               // { locations, routes }
   locById: new Map(),
   claims: [],              // GET /claims (open claims, world-wide)
-  faction: null,           // GET /factions/:id snapshot
-  factionId: localStorage.getItem('wasteland.factionId'),
+  session: localStorage.getItem('wasteland.session'), // bearer token (ADR-0004)
+  user: null,              // GET /me user
+  faction: null,           // GET /me faction snapshot (null until founded)
+  factionId: null,         // derived from state.faction.id
   selectedCrewId: null,
   selectedLocation: null,  // clicked location object
   hqPick: null,            // location picked as HQ during founding
@@ -190,9 +206,21 @@ function toast(text) {
   toastTimer = setTimeout(() => { el.style.display = 'none' }, 5000)
 }
 
-async function api(path, options) {
-  const res = await fetch(path, options)
+async function api(path, options = {}) {
+  const headers = { ...(options.headers || {}) }
+  if (state.session) headers.authorization = `Bearer ${state.session}`
+  const res = await fetch(path, { ...options, headers })
   const body = await res.json().catch(() => ({}))
+  if (res.status === 401) {
+    // Session missing/expired — drop it and fall back to sign-in.
+    if (state.session) {
+      state.session = null
+      localStorage.removeItem('wasteland.session')
+      state.faction = state.user = state.factionId = null
+      renderFaction()
+    }
+    throw new Error(body.message || 'not signed in')
+  }
   if (!res.ok) throw new Error(body.message || body.error || `HTTP ${res.status}`)
   return body
 }
@@ -376,9 +404,22 @@ function renderReports() {
   }
 }
 
+function renderWhoami() {
+  const el = $('whoami')
+  if (state.session && state.user) {
+    el.innerHTML = `signed in as ${state.user.displayName} &middot; <a href="#" id="signout">sign out</a>`
+    $('signout').onclick = (e) => { e.preventDefault(); signOut() }
+  } else {
+    el.textContent = ''
+  }
+}
+
 function renderFaction() {
+  const loggedIn = !!state.session
   const hasFaction = !!state.faction
-  $('found-card').hidden = hasFaction
+  renderWhoami()
+  $('login-card').hidden = loggedIn
+  $('found-card').hidden = !loggedIn || hasFaction
   $('faction-card').hidden = !hasFaction
   $('crews-card').hidden = !hasFaction
   $('missions-card').hidden = !hasFaction
@@ -386,7 +427,7 @@ function renderFaction() {
 
   const f = state.faction
   const factionBody = $('faction-body')
-  factionBody.innerHTML = `<div class="row"><b class="accent">${f.faction.name}</b></div>`
+  factionBody.innerHTML = `<div class="row"><b class="accent">${f.name}</b></div>`
   for (const outpost of f.outposts) {
     const dormant = outpost.dormantAt
       ? `<span class="danger">Dormant ${new Date(outpost.dormantAt) <= new Date() ? 'now' : 'at ' + new Date(outpost.dormantAt).toLocaleString()}</span>`
@@ -452,7 +493,7 @@ function locNameById(id) {
 
 function onLocationClick(loc) {
   state.selectedLocation = loc
-  if (!state.faction && !loc.controlling_faction_id) {
+  if (state.session && !state.faction && !loc.controlling_faction_id && !openClaimAt(loc.slug)) {
     state.hqPick = loc
     $('found-hint').hidden = true
     $('found-form').hidden = false
@@ -466,22 +507,61 @@ $('found-form').addEventListener('submit', async (event) => {
   event.preventDefault()
   if (!state.hqPick) return toast('Pick an HQ Location on the map first.')
   try {
-    const result = await api('/factions', {
+    await api('/factions', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
-        email: $('f-email').value,
-        displayName: $('f-name').value,
         factionName: $('f-faction').value,
         hqLocationSlug: state.hqPick.slug,
       }),
     })
-    state.factionId = result.factionId
-    localStorage.setItem('wasteland.factionId', result.factionId)
     logLine(`Faction founded at ${state.hqPick.name}`, 'ok')
-    await refreshAll()
+    state.hqPick = null
+    await refreshFaction()
+    await refreshMap()
+    renderLocationCard()
   } catch (err) { toast(err.message) }
 })
+
+$('login-form').addEventListener('submit', async (event) => {
+  event.preventDefault()
+  const email = $('l-email').value.trim()
+  const displayName = $('l-name').value.trim()
+  try {
+    const res = await api('/auth/request-link', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ email, ...(displayName ? { displayName } : {}) }),
+    })
+    $('login-sent-email').textContent = email
+    $('login-form').hidden = true
+    $('login-sent').hidden = false
+    logLine(`Magic link sent to ${email}`, 'ok')
+    if (res.link) {
+      const btn = $('dev-open')
+      btn.hidden = false
+      btn.onclick = () => { location.href = res.link }
+    }
+  } catch (err) {
+    if (/display name/i.test(err.message)) {
+      toast('New here? Enter a name too.'); $('l-name').focus()
+    } else { toast(err.message) }
+  }
+})
+
+async function signOut() {
+  try { await api('/auth/logout', { method: 'POST' }) } catch { /* revoke is best-effort */ }
+  state.session = null
+  localStorage.removeItem('wasteland.session')
+  state.user = state.faction = state.factionId = null
+  state.selectedCrewId = null
+  $('login-form').hidden = false
+  $('login-sent').hidden = true
+  logLine('Signed out.')
+  renderFaction()
+  renderLocationCard()
+  renderMap()
+}
 
 async function dispatchMission(kind, target) {
   try {
@@ -489,7 +569,6 @@ async function dispatchMission(kind, target) {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
-        factionId: state.factionId,
         crewId: state.selectedCrewId,
         targetLocationSlug: target.slug,
         kind,
@@ -516,15 +595,15 @@ async function refreshMap() {
 }
 
 async function refreshFaction() {
-  if (!state.factionId) { state.faction = null; renderFaction(); return }
+  if (!state.session) { state.user = state.faction = state.factionId = null; renderFaction(); return }
   try {
-    state.faction = await api(`/factions/${state.factionId}`)
-  } catch (err) {
-    // stale localStorage (e.g. dev DB wiped) — start over
-    logLine(`Faction not found (${err.message}); clearing saved id`, 'danger')
-    localStorage.removeItem('wasteland.factionId')
-    state.factionId = null
-    state.faction = null
+    const me = await api('/me')
+    state.user = me.user
+    state.faction = me.faction
+    state.factionId = me.faction ? me.faction.id : null
+  } catch {
+    // api() already cleared the session on 401 and re-rendered.
+    return
   }
   renderFaction()
 }
@@ -535,12 +614,6 @@ async function refreshClaims() {
   if (state.map) renderMap() // claim rings live on the map
 }
 
-async function refreshAll() {
-  await refreshMap()
-  await refreshClaims()
-  await refreshFaction()
-  renderLocationCard()
-}
 
 function connectWs() {
   const ws = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`)
@@ -607,11 +680,36 @@ setInterval(() => {
 }, 1000)
 setInterval(refreshFaction, 10_000)
 
-refreshAll().then(() => {
-  $('found-card').hidden = !!state.factionId
+async function boot() {
+  // A magic link lands as /?token=… — consume it, store the session, clean the URL.
+  const url = new URL(location.href)
+  const token = url.searchParams.get('token')
+  if (token) {
+    try {
+      const res = await api('/auth/verify', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ token }),
+      })
+      state.session = res.sessionToken
+      localStorage.setItem('wasteland.session', res.sessionToken)
+      logLine('Signed in.', 'ok')
+    } catch {
+      toast('That magic link is invalid or expired — sign in again.')
+    }
+    url.searchParams.delete('token')
+    history.replaceState({}, '', url.pathname + url.search)
+  }
+
+  await refreshMap()
+  await refreshClaims()
+  await refreshFaction() // GET /me when signed in; otherwise shows the sign-in card
+  renderLocationCard()
   connectWs()
-  logLine('Map loaded. ' + (state.factionId ? 'Welcome back.' : 'Click a free Location to found your Faction.'))
-}).catch(err => toast(err.message))
+  logLine('Map loaded.' + (state.session ? '' : ' Sign in to play.'))
+}
+
+boot().catch(err => toast(err.message))
 </script>
 </body>
 </html>

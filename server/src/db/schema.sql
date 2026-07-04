@@ -17,6 +17,25 @@ create table if not exists factions (
   created_at        timestamptz not null default now()
 );
 
+-- Magic-link login: a single-use, short-lived token emailed to the user.
+create table if not exists login_tokens (
+  token        text primary key,
+  user_id      uuid not null references users(id),
+  created_at   timestamptz not null default now(),
+  expires_at   timestamptz not null,
+  consumed_at  timestamptz
+);
+
+-- Bearer sessions: an opaque token resolving to a user. Server-side and
+-- revocable (ADR-0004) — the client never carries identity in request bodies.
+create table if not exists sessions (
+  token         text primary key,
+  user_id       uuid not null references users(id),
+  created_at    timestamptz not null default now(),
+  expires_at    timestamptz not null,
+  last_seen_at  timestamptz
+);
+
 create table if not exists locations (
   id                      uuid primary key default gen_random_uuid(),
   slug                    text not null unique,

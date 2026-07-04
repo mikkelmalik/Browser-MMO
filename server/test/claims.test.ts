@@ -254,10 +254,11 @@ describe('contested window close', () => {
 describe('founding vs open claims', () => {
   test('cannot found an HQ on a Location with an open claim', async () => {
     await openClaim()
+    const latecomer = (await db.query<{ id: string }>(
+      `insert into users (email, display_name) values ('late@test.no', 'Latecomer') returning id`)).rows[0]!
     await expect(
       foundFaction(db, {
-        email: 'late@test.no',
-        displayName: 'Latecomer',
+        userId: latecomer.id,
         factionName: 'Late Boys',
         hqLocationSlug: 'rich-ruins',
       }, minutes(40)),

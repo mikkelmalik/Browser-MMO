@@ -1,4 +1,4 @@
-import Fastify, { type FastifyInstance } from 'fastify'
+import Fastify, { type FastifyInstance, type FastifyRequest } from 'fastify'
 import websocket from '@fastify/websocket'
 import { z, ZodError } from 'zod'
 import type { Db } from '../db/db.js'
@@ -7,13 +7,23 @@ import { dispatchScavenge } from '../domain/scavenge.js'
 import { dispatchClaim, dispatchContest, type Rng } from '../domain/claims.js'
 import { processDueEvents } from '../domain/events.js'
 import { foundFaction } from '../domain/founding.js'
+import { authenticate, requestLoginLink, revokeSession, verifyLoginToken, type AuthedUser } from '../domain/auth.js'
 import { settleStore } from '../domain/settlement.js'
+
+/** Delivers a magic-link email. Injected so production swaps in a real mailer (ADR-0004). */
+export type SendMagicLink = (args: { email: string; link: string; isNewUser: boolean }) => void | Promise<void>
 
 export interface AppDeps {
   db: Db
   clock: () => Date
   /** Combat luck source; injectable for tests. */
   rng?: Rng
+  /** How to deliver a login link. Defaults to logging it (no mailer wired). */
+  sendMagicLink?: SendMagicLink
+  /** Absolute origin used to build the link in the email (e.g. https://play.example). */
+  baseUrl?: string
+  /** Dev/test only: return the login link in the HTTP response. Never enable in prod. */
+  exposeMagicLink?: boolean
 }
 
 export interface App {
@@ -22,21 +32,38 @@ export interface App {
   tickDue: () => Promise<void>
 }
 
-const FoundBody = z.object({
+const RequestLinkBody = z.object({
   email: z.string().min(3),
-  displayName: z.string().min(1),
+  displayName: z.string().min(1).optional(),
+})
+
+const VerifyBody = z.object({
+  token: z.string().min(1),
+})
+
+const FoundBody = z.object({
   factionName: z.string().min(1),
   hqLocationSlug: z.string().min(1),
 })
 
 const MissionBody = z.object({
-  factionId: z.string().min(1),
   crewId: z.string().min(1),
   targetLocationSlug: z.string().min(1),
   kind: z.enum(['scavenge', 'claim', 'contest']).default('scavenge'),
 })
 
-export async function buildApp({ db, clock, rng = Math.random }: AppDeps): Promise<App> {
+const defaultMailer: SendMagicLink = ({ email, link }) => {
+  console.log(`[magic-link] ${email} -> ${link}`)
+}
+
+export async function buildApp({
+  db,
+  clock,
+  rng = Math.random,
+  sendMagicLink = defaultMailer,
+  baseUrl = '',
+  exposeMagicLink = false,
+}: AppDeps): Promise<App> {
   const fastify = Fastify()
   await fastify.register(websocket)
 
@@ -48,6 +75,9 @@ export async function buildApp({ db, clock, rng = Math.random }: AppDeps): Promi
     }
   }
 
+  // The WebSocket is an unauthenticated read-only firehose of world changes;
+  // clients filter by factionId. Writes are all authenticated below — this
+  // socket carries no identity and grants no authority (ADR-0004).
   fastify.get('/ws', { websocket: true }, (socket) => {
     sockets.add(socket)
     socket.on('close', () => sockets.delete(socket))
@@ -55,7 +85,7 @@ export async function buildApp({ db, clock, rng = Math.random }: AppDeps): Promi
 
   fastify.setErrorHandler((err, _req, reply) => {
     if (err instanceof DomainError) {
-      const status = err.code.endsWith('_not_found') ? 404 : 409
+      const status = err.status ?? (err.code.endsWith('_not_found') ? 404 : 409)
       return reply.status(status).send({ error: err.code, message: err.message })
     }
     if (err instanceof ZodError) {
@@ -65,20 +95,69 @@ export async function buildApp({ db, clock, rng = Math.random }: AppDeps): Promi
     return reply.status(500).send({ error: 'internal' })
   })
 
+  /** The bearer token from the Authorization header, or null. Scheme is case-insensitive (RFC 7235). */
+  const bearerToken = (req: FastifyRequest): string | null => {
+    const [scheme, token] = (req.headers.authorization ?? '').split(' ')
+    return scheme?.toLowerCase() === 'bearer' && token ? token : null
+  }
+
+  /** Resolve the caller's session from the Authorization header, or reject with 401. */
+  const requireAuth = async (req: FastifyRequest): Promise<AuthedUser> => {
+    const token = bearerToken(req)
+    if (!token) throw new DomainError('unauthenticated', 'missing bearer token', 401)
+    return authenticate(db, token, clock())
+  }
+
+  // --- Auth: magic-link login ---
+
+  fastify.post('/auth/request-link', async (req, reply) => {
+    const body = RequestLinkBody.parse(req.body)
+    const link = await requestLoginLink(db, body, clock())
+    const url = `${baseUrl}/?token=${link.token}`
+    await sendMagicLink({ email: body.email, link: url, isNewUser: link.isNewUser })
+    // 202: we've accepted the request and (tried to) send the mail.
+    return reply.status(202).send({ ok: true, ...(exposeMagicLink ? { link: url, token: link.token } : {}) })
+  })
+
+  fastify.post('/auth/verify', async (req, reply) => {
+    const { token } = VerifyBody.parse(req.body)
+    const session = await verifyLoginToken(db, token, clock())
+    return reply.send({ sessionToken: session.token, expiresAt: session.expiresAt.toISOString() })
+  })
+
+  fastify.post('/auth/logout', async (req, reply) => {
+    const token = bearerToken(req)
+    if (token) await revokeSession(db, token) // idempotent — no error if already gone
+    return reply.status(204).send()
+  })
+
+  fastify.get('/me', async (req, reply) => {
+    const auth = await requireAuth(req)
+    const user = (await db.query<{ id: string; display_name: string; email: string }>(
+      `select id, display_name, email from users where id = $1`, [auth.userId])).rows[0]!
+    const faction = auth.factionId ? await factionSnapshot(auth.factionId, clock()) : null
+    return reply.send({ user: { id: user.id, displayName: user.display_name, email: user.email }, faction })
+  })
+
+  // --- Game actions (all authenticated; identity comes from the session) ---
+
   fastify.post('/factions', async (req, reply) => {
+    const auth = await requireAuth(req)
     const body = FoundBody.parse(req.body)
-    const result = await foundFaction(db, body, clock())
+    const result = await foundFaction(db, { userId: auth.userId, ...body }, clock())
     broadcast({ type: 'faction_founded', factionId: result.factionId, hqLocationSlug: body.hqLocationSlug })
     return reply.status(201).send(result)
   })
 
   fastify.post('/missions', async (req, reply) => {
+    const auth = await requireAuth(req)
+    if (!auth.factionId) throw new DomainError('no_faction', 'found a faction first', 409)
     const body = MissionBody.parse(req.body)
     const target = (await db.query<{ id: string }>(
       `select id from locations where slug = $1`, [body.targetLocationSlug])).rows[0]
     if (!target) throw new DomainError('location_not_found', `no location '${body.targetLocationSlug}'`)
 
-    const args = { factionId: body.factionId, crewId: body.crewId, targetLocationId: target.id }
+    const args = { factionId: auth.factionId, crewId: body.crewId, targetLocationId: target.id }
     const now = clock()
     const result = body.kind === 'claim' ? await dispatchClaim(db, args, now)
       : body.kind === 'contest' ? await dispatchContest(db, args, now)
@@ -89,7 +168,7 @@ export async function buildApp({ db, clock, rng = Math.random }: AppDeps): Promi
       type: 'mission_dispatched',
       kind: body.kind,
       missionId: result.missionId,
-      factionId: body.factionId,
+      factionId: auth.factionId,
       crewId: body.crewId,
       targetLocationSlug: body.targetLocationSlug,
       dueAt: dueAt.toISOString(),
@@ -129,12 +208,10 @@ export async function buildApp({ db, clock, rng = Math.random }: AppDeps): Promi
     return { locations, routes }
   })
 
-  fastify.get('/factions/:id', async (req, reply) => {
-    const { id } = req.params as { id: string }
-    const now = clock()
-
+  /** The authenticated player's own dashboard: outposts (settled), crews, active missions, reports. */
+  async function factionSnapshot(factionId: string, now: Date) {
     const faction = (await db.query<{ id: string; name: string }>(
-      `select id, name from factions where id = $1`, [id])).rows[0]
+      `select id, name from factions where id = $1`, [factionId])).rows[0]
     if (!faction) throw new DomainError('faction_not_found', 'no such faction')
 
     const outpostRows = (await db.query<{
@@ -146,7 +223,7 @@ export async function buildApp({ db, clock, rng = Math.random }: AppDeps): Promi
     }>(
       `select o.id, o.is_hq, o.survivors, o.dormant_at, l.slug
        from outposts o join locations l on l.id = o.location_id
-       where o.faction_id = $1`, [id])).rows
+       where o.faction_id = $1`, [factionId])).rows
 
     const outposts = []
     for (const outpost of outpostRows) {
@@ -186,19 +263,18 @@ export async function buildApp({ db, clock, rng = Math.random }: AppDeps): Promi
 
     const crews = (await db.query(
       `select id, name, size, status, location_id from crews where faction_id = $1 order by created_at`,
-      [id])).rows
+      [factionId])).rows
     const missions = (await db.query(
       `select id, crew_id, kind, status, target_location_id, departed_at, due_at
-       from missions where faction_id = $1 and status = 'underway'`, [id])).rows
-
+       from missions where faction_id = $1 and status = 'underway'`, [factionId])).rows
     const reports = (await db.query(
       `select r.id, r.kind, r.body, r.created_at, rf.read_at
        from report_factions rf join reports r on r.id = rf.report_id
        where rf.faction_id = $1
-       order by r.created_at desc limit 20`, [id])).rows
+       order by r.created_at desc limit 20`, [factionId])).rows
 
-    return reply.send({ faction, outposts, crews, missions, reports })
-  })
+    return { id: faction.id, name: faction.name, outposts, crews, missions, reports }
+  }
 
   const tickDue = async () => {
     const events = await processDueEvents(db, clock(), rng)

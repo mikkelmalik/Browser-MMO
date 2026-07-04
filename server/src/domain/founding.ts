@@ -15,8 +15,8 @@ export const STARTING = {
 } as const
 
 export interface FoundArgs {
-  email: string
-  displayName: string
+  /** The authenticated user founding the Faction (one Faction per user). */
+  userId: string
   factionName: string
   hqLocationSlug: string
 }
@@ -29,12 +29,16 @@ export interface FoundResult {
 }
 
 /**
- * Found a new player Faction: HQ Outpost at a free Location of the player's
- * choosing (decided: free choice anywhere unclaimed), starter stores whose
- * rates derive from the Location's yields, and one starter Crew.
+ * Found a new player Faction for an existing user: HQ Outpost at a free
+ * Location of the player's choosing (decided: free choice anywhere unclaimed),
+ * starter stores whose rates derive from the Location's yields, and one Crew.
  */
 export async function foundFaction(db: Db, args: FoundArgs, now: Date): Promise<FoundResult> {
   return db.transaction(async (tx) => {
+    const existing = (await tx.query(
+      `select 1 from factions where owner_user_id = $1`, [args.userId])).rows[0]
+    if (existing) throw new DomainError('already_founded', 'you already control a faction')
+
     const location = (await tx.query<{
       id: string
       controlling_faction_id: string | null
@@ -56,12 +60,9 @@ export async function foundFaction(db: Db, args: FoundArgs, now: Date): Promise<
       throw new DomainError('claim_already_open', 'a claim is already open on that location')
     }
 
-    const user = (await tx.query<{ id: string }>(
-      `insert into users (email, display_name) values ($1, $2) returning id`,
-      [args.email, args.displayName])).rows[0]!
     const faction = (await tx.query<{ id: string }>(
       `insert into factions (name, owner_user_id, last_seen_at) values ($1, $2, $3) returning id`,
-      [args.factionName, user.id, now])).rows[0]!
+      [args.factionName, args.userId, now])).rows[0]!
     const outpost = (await tx.query<{ id: string }>(
       `insert into outposts (faction_id, location_id, is_hq, survivors, founded_at)
        values ($1, $2, true, $3, $4) returning id`,
@@ -94,6 +95,6 @@ export async function foundFaction(db: Db, args: FoundArgs, now: Date): Promise<
     await tx.query(`update locations set controlling_faction_id = $1 where id = $2`,
       [faction.id, location.id])
 
-    return { userId: user.id, factionId: faction.id, hqOutpostId: outpost.id, crewId: crew.id }
+    return { userId: args.userId, factionId: faction.id, hqOutpostId: outpost.id, crewId: crew.id }
   })
 }
